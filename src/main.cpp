@@ -41,24 +41,18 @@ struct Submission {
 
 static inline int probIndexFromChar(char c){ return c - 'A'; }
 
-struct RankKey {
-    int solved;
-    long long penalty;
-    vector<int> times_desc; // sorted descending
-    string name;
-};
-
-static bool rankLess(const RankKey &a, const RankKey &b){
-    if (a.solved != b.solved) return a.solved > b.solved; // more solved higher
-    if (a.penalty != b.penalty) return a.penalty < b.penalty; // less penalty higher
-    // compare lexicographically by times in descending order: smaller max time ranks higher
-    size_t n = max(a.times_desc.size(), b.times_desc.size());
+static bool teamRankLess(const TeamState &ta, const TeamState &tb){
+    if (ta.solved_visible != tb.solved_visible) return ta.solved_visible > tb.solved_visible;
+    if (ta.penalty_visible != tb.penalty_visible) return ta.penalty_visible < tb.penalty_visible;
+    const auto &A = ta.solve_times_visible;
+    const auto &B = tb.solve_times_visible;
+    size_t n = max(A.size(), B.size());
     for (size_t i = 0; i < n; ++i){
-        int ta = (i < a.times_desc.size() ? a.times_desc[i] : 0);
-        int tb = (i < b.times_desc.size() ? b.times_desc[i] : 0);
-        if (ta != tb) return ta < tb; // smaller max time ranks higher
+        int va = (i < A.size() ? A[i] : 0);
+        int vb = (i < B.size() ? B[i] : 0);
+        if (va != vb) return va < vb;
     }
-    return a.name < b.name; // name ascending
+    return ta.name < tb.name;
 }
 
 struct SystemState {
@@ -75,21 +69,14 @@ struct SystemState {
     // "live" scoreboard snapshot inputs come from teams[*].{solved_visible, penalty_visible, solve_times_visible}
 };
 
-static RankKey makeRankKey(const TeamState &t){
-    RankKey k;
-    k.solved = t.solved_visible;
-    k.penalty = t.penalty_visible;
-    k.times_desc = t.solve_times_visible; // already stored descending
-    k.name = t.name;
-    return k;
-}
+// no materialized key needed; compare teams directly
 
 static void computeOrder(const SystemState &S, vector<int> &order){
     int n = (int)S.teams.size();
     order.resize(n);
     iota(order.begin(), order.end(), 0);
     sort(order.begin(), order.end(), [&](int a, int b){
-        return rankLess(makeRankKey(S.teams[a]), makeRankKey(S.teams[b]));
+        return teamRankLess(S.teams[a], S.teams[b]);
     });
 }
 
@@ -244,59 +231,47 @@ int main(){
                 continue;
             }
             cout << "[Info]Scroll scoreboard.\n";
-            // First, flush (update ranking) and print the scoreboard before scrolling
+            // First, compute initial order and print scoreboard before scrolling
             vector<int> order;
             computeOrder(S, order);
             setLastRankingFromOrder(S, order);
             printScoreboard(S, order);
 
-            // Prepare: for each team, collect list of frozen problems (by index), sorted by problem id ascending
+            // Build per-team frozen problem lists
             int n = (int)S.teams.size();
             vector<vector<int>> frozen_list(n);
             for (int i = 0; i < n; ++i){
                 for (int p = 0; p < S.problem_count; ++p){
-                    const auto &ps = S.teams[i].problems[p];
-                    if (ps.frozen) frozen_list[i].push_back(p);
+                    if (S.teams[i].problems[p].frozen) frozen_list[i].push_back(p);
                 }
             }
 
-            auto teamHasFrozen = [&](int i){ return !frozen_list[i].empty(); };
+            auto hasFrozen = [&](int tid){ return !frozen_list[tid].empty(); };
 
-            // Repeat until no team has frozen problems
             while (true){
-                // Find lowest-ranked team with frozen problems (use current order, without touching last_ranking)
+                // Select lowest-ranked team with frozen problems on current order
                 computeOrder(S, order);
-                int chosen_team = -1;
-                for (int pos = (int)order.size()-1; pos >= 0; --pos){
-                    int tid = order[pos];
-                    if (teamHasFrozen(tid)) { chosen_team = tid; break; }
+                int chosen = -1;
+                for (int i = (int)order.size()-1; i >= 0; --i){
+                    if (hasFrozen(order[i])) { chosen = order[i]; break; }
                 }
-                if (chosen_team == -1) break; // none left
+                if (chosen == -1) break;
 
-                // Unfreeze the smallest problem id for that team
-                int pidx = *min_element(frozen_list[chosen_team].begin(), frozen_list[chosen_team].end());
-                // remove from list
-                frozen_list[chosen_team].erase(find(frozen_list[chosen_team].begin(), frozen_list[chosen_team].end(), pidx));
+                // Choose the smallest problem id
+                int pidx = *min_element(frozen_list[chosen].begin(), frozen_list[chosen].end());
+                frozen_list[chosen].erase(find(frozen_list[chosen].begin(), frozen_list[chosen].end(), pidx));
 
-                TeamState &t = S.teams[chosen_team];
-                ProblemState &ps = t.problems[pidx];
-
-                // Apply the real results to visible scoreboard
-                int prev_solved = t.solved_visible;
-                long long prev_penalty = t.penalty_visible;
-                vector<int> prev_times = t.solve_times_visible;
-
-                // Capture order before applying for promotion logging
+                // Capture order before applying
                 vector<int> order_before;
                 computeOrder(S, order_before);
                 int pos_before = -1;
-                for (int i = 0; i < (int)order_before.size(); ++i){ if (order_before[i] == chosen_team) { pos_before = i; break; } }
+                for (int i = 0; i < (int)order_before.size(); ++i){ if (order_before[i] == chosen) { pos_before = i; break; } }
 
-                // resolve the frozen sequence: wrong_in_freeze then optional AC at ac_time_in_freeze
+                // Apply results to visible scoreboard
+                TeamState &t = S.teams[chosen];
+                ProblemState &ps = t.problems[pidx];
                 if (!ps.solved){
-                    // update wrong attempts from freeze (those before AC)
-                    int wrong_add = ps.wrong_in_freeze;
-                    ps.wrong_before += wrong_add;
+                    ps.wrong_before += ps.wrong_in_freeze;
                     if (ps.ac_in_freeze){
                         ps.solved = true;
                         ps.first_ac_time = ps.ac_time_in_freeze;
@@ -313,20 +288,20 @@ int main(){
                 ps.ac_in_freeze = false;
                 ps.ac_time_in_freeze = 0;
 
-                // Determine pos_after after applying
+                // Capture order after applying
                 vector<int> order_after;
                 computeOrder(S, order_after);
                 int pos_after = -1;
-                for (int i = 0; i < (int)order_after.size(); ++i){ if (order_after[i] == chosen_team) { pos_after = i; break; } }
+                for (int i = 0; i < (int)order_after.size(); ++i){ if (order_after[i] == chosen) { pos_after = i; break; } }
 
-                // Output exactly one line per unfreeze that causes ranking change
+                // If position improved, output one line with replaced team at the new position
                 if (pos_before != -1 && pos_after != -1 && pos_after < pos_before){
                     int replaced_id = order_before[pos_after];
-                    cout << S.teams[chosen_team].name << ' ' << S.teams[replaced_id].name << ' ' << S.teams[chosen_team].solved_visible << ' ' << S.teams[chosen_team].penalty_visible << "\n";
+                    cout << S.teams[chosen].name << ' ' << S.teams[replaced_id].name << ' ' << S.teams[chosen].solved_visible << ' ' << S.teams[chosen].penalty_visible << "\n";
                 }
             }
 
-            // after scrolling all, print final scoreboard and lift frozen state
+            // Print final scoreboard and lift frozen
             vector<int> order_final;
             computeOrder(S, order_final);
             setLastRankingFromOrder(S, order_final);
