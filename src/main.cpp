@@ -28,6 +28,10 @@ struct TeamState {
     // per-problem state
     vector<ProblemState> problems;  // indexed 0..M-1
 
+    // team-local submission records for fast QUERY_SUBMISSION
+    struct SubmitRec { int prob_idx; int status_code; int time; };
+    vector<SubmitRec> submit_records;
+
     // helper computed each flush: ranking index after last FLUSH
     int last_ranking = 0;
 };
@@ -114,6 +118,13 @@ static void printScoreboard(const SystemState &S, const vector<int> &order){
         }
         cout << '\n';
     }
+}
+
+static inline int statusCodeFromString(const string &s){
+    if (s == "Accepted") return 0;
+    if (s == "Wrong_Answer") return 1;
+    if (s == "Runtime_Error") return 2;
+    return 3; // Time_Limit_Exceed
 }
 
 int main(){
@@ -212,6 +223,8 @@ int main(){
                     }
                 }
             }
+            // record into team-local submissions for fast queries
+            S.teams[team_id].submit_records.push_back({pidx, statusCodeFromString(status), time});
         } else if (cmd == "FLUSH"){
             // Recompute ranking and update last_ranking, then print info
             vector<int> order;
@@ -348,21 +361,23 @@ int main(){
                 string status_val = parse_kv(status_token, "STATUS=");
                 int target_prob = -1;
                 if (!prob_val.empty() && prob_val != "ALL") target_prob = probIndexFromChar(prob_val[0]);
-                string target_status = status_val.empty() ? string("ALL") : status_val;
-                // Find last submission satisfying conditions (including after freeze)
+                int target_status_code = -1;
+                if (!status_val.empty() && status_val != "ALL") target_status_code = statusCodeFromString(status_val);
+                // Find last submission from team records
+                const auto &vec = S.teams[tid].submit_records;
                 int found_idx = -1;
-                for (int i = (int)S.submissions.size()-1; i >= 0; --i){
-                    const auto &sub = S.submissions[i];
-                    if (sub.team_id != tid) continue;
-                    if (target_prob != -1 && sub.prob_idx != target_prob) continue;
-                    if (target_status != "ALL" && sub.status != target_status) continue;
+                for (int i = (int)vec.size()-1; i >= 0; --i){
+                    const auto &r = vec[i];
+                    if (target_prob != -1 && r.prob_idx != target_prob) continue;
+                    if (target_status_code != -1 && r.status_code != target_status_code) continue;
                     found_idx = i; break;
                 }
                 if (found_idx == -1){
                     cout << "Cannot find any submission.\n";
                 } else {
-                    const auto &sub = S.submissions[found_idx];
-                    cout << S.teams[tid].name << ' ' << char('A'+sub.prob_idx) << ' ' << sub.status << ' ' << sub.time << "\n";
+                    static const char* SSTR[4] = {"Accepted","Wrong_Answer","Runtime_Error","Time_Limit_Exceed"};
+                    const auto &r = vec[found_idx];
+                    cout << S.teams[tid].name << ' ' << char('A'+r.prob_idx) << ' ' << SSTR[r.status_code] << ' ' << r.time << "\n";
                 }
             }
         } else if (cmd == "END"){
