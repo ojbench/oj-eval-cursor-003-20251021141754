@@ -237,38 +237,26 @@ int main(){
             setLastRankingFromOrder(S, order);
             printScoreboard(S, order);
 
-            // Build per-team frozen problem lists
             int n = (int)S.teams.size();
+            // Build frozen list per team (sorted)
             vector<vector<int>> frozen_list(n);
             for (int i = 0; i < n; ++i){
                 for (int p = 0; p < S.problem_count; ++p){
                     if (S.teams[i].problems[p].frozen) frozen_list[i].push_back(p);
                 }
+                if (!frozen_list[i].empty()) sort(frozen_list[i].begin(), frozen_list[i].end());
             }
 
-            auto hasFrozen = [&](int tid){ return !frozen_list[tid].empty(); };
+            // Position map for current order
+            vector<int> pos(n, 0);
+            for (int i = 0; i < n; ++i) pos[order[i]] = i;
 
-            while (true){
-                // Select lowest-ranked team with frozen problems on current order
-                computeOrder(S, order);
-                int chosen = -1;
-                for (int i = (int)order.size()-1; i >= 0; --i){
-                    if (hasFrozen(order[i])) { chosen = order[i]; break; }
-                }
-                if (chosen == -1) break;
+            using PII = pair<int,int>; // (pos, team)
+            priority_queue<PII> pq;
+            for (int i = 0; i < n; ++i) if (!frozen_list[i].empty()) pq.emplace(pos[i], i);
 
-                // Choose the smallest problem id
-                int pidx = *min_element(frozen_list[chosen].begin(), frozen_list[chosen].end());
-                frozen_list[chosen].erase(find(frozen_list[chosen].begin(), frozen_list[chosen].end(), pidx));
-
-                // Capture order before applying
-                vector<int> order_before;
-                computeOrder(S, order_before);
-                int pos_before = -1;
-                for (int i = 0; i < (int)order_before.size(); ++i){ if (order_before[i] == chosen) { pos_before = i; break; } }
-
-                // Apply results to visible scoreboard
-                TeamState &t = S.teams[chosen];
+            auto apply_unfreeze = [&](int team_id, int pidx){
+                TeamState &t = S.teams[team_id];
                 ProblemState &ps = t.problems[pidx];
                 if (!ps.solved){
                     ps.wrong_before += ps.wrong_in_freeze;
@@ -281,31 +269,52 @@ int main(){
                         sort(t.solve_times_visible.begin(), t.solve_times_visible.end(), greater<int>());
                     }
                 }
-                // clear frozen flags
                 ps.frozen = false;
                 ps.submissions_after_freeze = 0;
                 ps.wrong_in_freeze = 0;
                 ps.ac_in_freeze = false;
                 ps.ac_time_in_freeze = 0;
+            };
 
-                // Capture order after applying
-                vector<int> order_after;
-                computeOrder(S, order_after);
-                int pos_after = -1;
-                for (int i = 0; i < (int)order_after.size(); ++i){ if (order_after[i] == chosen) { pos_after = i; break; } }
+            while (!pq.empty()){
+                auto [pcur, team] = pq.top(); pq.pop();
+                if (frozen_list[team].empty()) continue; // stale
+                if (pcur != pos[team]) { pq.emplace(pos[team], team); continue; }
 
-                // If position improved, output one line with replaced team at the new position
-                if (pos_before != -1 && pos_after != -1 && pos_after < pos_before){
-                    int replaced_id = order_before[pos_after];
-                    cout << S.teams[chosen].name << ' ' << S.teams[replaced_id].name << ' ' << S.teams[chosen].solved_visible << ' ' << S.teams[chosen].penalty_visible << "\n";
+                int old_pos = pos[team];
+                int pidx = frozen_list[team].front();
+                frozen_list[team].erase(frozen_list[team].begin());
+
+                // Apply result
+                apply_unfreeze(team, pidx);
+
+                // Binary search new position in [0..old_pos]
+                int lo = 0, hi = old_pos, ins = old_pos;
+                while (lo <= hi){
+                    int mid = (lo + hi) >> 1;
+                    int other = order[mid];
+                    if (teamRankLess(S.teams[team], S.teams[other])) { ins = mid; hi = mid - 1; }
+                    else lo = mid + 1;
                 }
+
+                if (ins < old_pos){
+                    int replaced_id = order[ins];
+                    cout << S.teams[team].name << ' ' << S.teams[replaced_id].name << ' ' << S.teams[team].solved_visible << ' ' << S.teams[team].penalty_visible << "\n";
+                    // shift to move team upward
+                    for (int i = old_pos; i > ins; --i){
+                        order[i] = order[i-1];
+                        pos[order[i]] = i;
+                    }
+                    order[ins] = team;
+                    pos[team] = ins;
+                }
+
+                if (!frozen_list[team].empty()) pq.emplace(pos[team], team);
             }
 
-            // Print final scoreboard and lift frozen
-            vector<int> order_final;
-            computeOrder(S, order_final);
-            setLastRankingFromOrder(S, order_final);
-            printScoreboard(S, order_final);
+            // Final scoreboard
+            setLastRankingFromOrder(S, order);
+            printScoreboard(S, order);
             S.frozen = false;
         } else if (cmd == "QUERY_RANKING"){
             string team; cin >> team;
@@ -357,7 +366,7 @@ int main(){
                 }
             }
         } else if (cmd == "END"){
-            cout << "[Info]Competition ends.";
+            cout << "[Info]Competition ends.\n";
             break;
         } else {
             // skip unknown (input guaranteed valid format though)
